@@ -1,0 +1,23 @@
+[project]
+name = "coral_cli"
+version = "0.1.0"
+description = "CLI for interacting with the Coral Protocol"
+authors = [
+    {name = "KenjiPcx", email = "ken.pcx@outlook.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer (>=0.15.2,<0.16.0)",
+    "rich (>=14.0.0,<15.0.0)",
+    "questionary (>=2.1.0,<3.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+
+[tool.poetry.scripts]
+coral = "coral_cli.cli:main"
