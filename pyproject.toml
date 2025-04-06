@@ -13,11 +13,16 @@ dependencies = [
     "questionary (>=2.1.0,<3.0.0)"
 ]
 
-
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-
 [tool.poetry.scripts]
 coral = "coral_cli.cli:main"
+
+[tool.poetry]
+packages = [{include = "coral_cli"}]
+include = [
+    "coral_cli/templates/**/*",
+    "coral-server/**/*"
+]
