@@ -36,6 +36,10 @@ app = typer.Typer(
 
 console = Console()
 
+# --- Constants ---
+CORAL_SERVER_DOCKER_IMAGE = "coral-protocol/coral-server:latest"
+DEFAULT_CHATROOM_PORT = 3001
+
 # --- Helper Functions ---
 
 def is_docker_installed():
@@ -145,24 +149,34 @@ def version():
 
 @app.command()
 def chatroom(
-    action: str = typer.Argument(..., help="Action to perform: start"),
-    port: int = typer.Option(3001, "--port", "-p", help="Port to run the server on"),
-    mode: str = typer.Option("sse", "--mode", "-m", help="Server mode: sse, stdio")
+    action: str = typer.Argument("start", help="Action to perform: start."), # Default to start
+    port: int = typer.Option(DEFAULT_CHATROOM_PORT, "--port", "-p", help="Host port to map the server to."),
+    mode: str = typer.Option("sse", "--mode", "-m", help="Server communication mode (used by local Java run): sse, stdio."),
+    run_mode: str = typer.Option("local", "--run-mode", help="How to run the server: 'local' (Java JAR) or 'docker'.")
 ):
     """
-    Manage the Coral chatroom server
+    Manage the Coral chatroom server (local Java or Docker).
     """
     if action == "start":
-        start_chatroom_server(port, mode)
+        if run_mode == "local":
+            start_chatroom_server_local(port, mode)
+        elif run_mode == "docker":
+            start_chatroom_server_docker(port)
+        else:
+            console.print(f"[bold red]Invalid run mode '{run_mode}'. Choose 'local' or 'docker'.[/bold red]")
+            raise typer.Exit(1)
+    # Add stop/status later if needed
+    # elif action == "stop":
+    #     stop_chatroom_server(run_mode) # Stop might need to know how it was started
     else:
         console.print(f"[bold red]Unknown action: {action}[/bold red]")
-        console.print("[bold yellow]Available actions: start, stop, status[/bold yellow]")
+        console.print("[bold yellow]Available actions: start[/bold yellow]") # Update available actions
 
 
-def start_chatroom_server(port: int, mode: str):
-    """Start the Coral chatroom server"""
-    console.print("[bold blue]Starting Coral chatroom server...[/bold blue]")
-    
+def start_chatroom_server_local(port: int, mode: str):
+    """Start the Coral chatroom server locally using the Java JAR"""
+    console.print("[bold blue]Starting Coral chatroom server locally (Java)...[/bold blue]")
+
     # Check if Java is installed
     if not is_java_installed():
         console.print("[bold red]Error: Java is not installed or not in PATH[/bold red]")
@@ -171,7 +185,7 @@ def start_chatroom_server(port: int, mode: str):
         console.print("2. Make sure Java is in your PATH")
         console.print("3. Try running 'coral chatroom start' again")
         raise typer.Exit(1) # Exit if Java is missing
-    
+
     # Get the path to the JAR file
     jar_path = get_server_jar()
     if not jar_path:
@@ -182,62 +196,191 @@ def start_chatroom_server(port: int, mode: str):
         raise typer.Exit(1)
     else:
         console.print(f"Using server JAR: {jar_path}")
-    
+
     # Build the command based on the mode
     if mode == "sse":
         args = ["--sse-server-ktor", str(port)]
     elif mode == "stdio":
         args = ["--stdio"]
+        console.print("[bold yellow]Note: --port option is ignored in stdio mode.[/bold yellow]")
     else:
         console.print(f"[bold red]Unknown mode: {mode}[/bold red]")
-        console.print("[bold yellow]Available modes: sse, stdio[/bold yellow]")
+        console.print("[bold yellow]Available modes for local run: sse, stdio[/bold yellow]")
         raise typer.Exit(1)
-    
+
     try:
-        # Run the JAR
-        cmd = ["java", "-jar", str(jar_path)] + args # Ensure jar_path is string
-        
-        console.print(f"[bold green]Starting Coral chatroom server on port {port} in {mode} mode[/bold green]")
+        cmd = ["java", "-jar", str(jar_path)] + args
+        console.print(f"[bold green]Running command: {' '.join(cmd)}[/bold green]")
         if mode == "sse":
-            console.print(f"[bold green]Server URL: http://localhost:{port}/sse[/bold green]")
-        
-        # Run the server in the foreground
+            console.print(f"[bold green]Server URL (local): http://localhost:{port}/sse[/bold green]")
+
         console.print("[bold yellow]Press Ctrl+C to stop the server[/bold yellow]")
-        # Use Popen to allow graceful shutdown? For now, run is simpler.
         process = subprocess.Popen(cmd)
-        process.wait() # Wait for the process to complete (e.g., via Ctrl+C)
-    
+        process.wait()
+
     except KeyboardInterrupt:
         console.print("\n[bold green]Coral chatroom server stopped by user.[/bold green]")
     except FileNotFoundError:
         console.print("[bold red]Error: 'java' command not found. Is Java installed and in your PATH?[/bold red]")
         raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[bold red]Error starting server: {str(e)}[/bold red]")
+        console.print(f"[bold red]Error starting local server: {str(e)}[/bold red]")
         raise typer.Exit(1)
 
 
-def get_server_jar() -> Optional[str]: # Return Optional[str]
-    """Get the path to the server JAR file"""
-    # Define potential locations
+def start_chatroom_server_docker(port: int):
+    """Start the Coral chatroom server using Docker"""
+    console.print("[bold blue]Starting Coral chatroom server (Docker)...[/bold blue]")
+
+    # Check Docker prerequisite
+    if not is_docker_installed():
+        console.print("[bold red]Error: Docker is required for '--run-mode docker', but the 'docker' command was not found.[/bold red]")
+        console.print("[bold yellow]Please ensure Docker Desktop (or Docker Engine) is installed, running, and that the 'docker' command is accessible in your system's PATH.[/bold yellow]")
+        console.print("[bold yellow]You can test this by simply typing 'docker --version' in your terminal.[/bold yellow]")
+        console.print("[bold yellow]Alternatively, choose '--run-mode local' if you prefer not to use Docker.[/bold yellow]")
+        raise typer.Exit(1)
+
+    # --- Define Paths relative to CLI ---
+    cli_dir = Path(__file__).parent.resolve() # Get the resolved path of the cli directory
+    dockerfile_path = cli_dir / "dockerfiles" / "coral-server.Dockerfile"
+    jar_name = "coral-server.jar" # Expected JAR name
+    jar_in_binaries = cli_dir / "binaries" / jar_name
+
+    # --- Find Dockerfile ---
+    if not dockerfile_path.exists():
+        console.print(f"[bold red]Error: Coral Server Dockerfile not found.[/bold red]")
+        console.print(f"[bold yellow]Expected location: {dockerfile_path}[/bold yellow]")
+        raise typer.Exit(1)
+    else:
+        console.print(f"Using Dockerfile: {dockerfile_path}")
+
+    # --- Ensure JAR exists in binaries/ for Build Context ---
+    if not jar_in_binaries.exists():
+        console.print(f"[yellow]Server JAR '{jar_name}' not found in '{cli_dir / 'binaries'}'.[/yellow]")
+        # Try finding it using get_server_jar and copy it if necessary
+        found_jar_path_str = get_server_jar() # This function already tries to copy to ~/.coral/bin
+        if found_jar_path_str:
+            found_jar_path = Path(found_jar_path_str)
+            # Ensure the binaries directory exists
+            (cli_dir / "binaries").mkdir(parents=True, exist_ok=True)
+            target_path = jar_in_binaries # The destination is binaries/coral-server.jar
+
+            # Copy the found JAR to the binaries directory if it's not already there
+            if not target_path.exists() or found_jar_path.resolve() != target_path.resolve():
+                 console.print(f"[yellow]Attempting to copy '{found_jar_path.name}' to '{target_path}'...[/yellow]")
+                 try:
+                     shutil.copy(found_jar_path, target_path)
+                     console.print("[green]JAR copied successfully to binaries/ for Docker build.[/green]")
+                 except Exception as e:
+                     console.print(f"[bold red]Error copying JAR to binaries/: {e}[/bold red]")
+                     console.print(f"[bold yellow]Please ensure the server JAR '{jar_name}' exists in '{cli_dir / 'binaries'}' or run './gradlew build' in the 'coral-server' directory and retry.[/bold yellow]")
+                     raise typer.Exit(1)
+            # If it already exists, no need to copy
+        else:
+            # If get_server_jar also failed to find/copy it
+            console.print(f"[bold red]Error: Server JAR '{jar_name}' could not be located.[/bold red]")
+            console.print(f"[bold yellow]Please run './gradlew build' in the 'coral-server' directory, ensure the JAR is copied to '{cli_dir / 'binaries'}', and retry.[/bold yellow]")
+            raise typer.Exit(1)
+
+    # --- Build the Docker image ---
+    console.print(f"Building Docker image '{CORAL_SERVER_DOCKER_IMAGE}' using context '{cli_dir}'...")
+    try:
+        build_cmd = ["docker", "build", "-f", str(dockerfile_path), "-t", CORAL_SERVER_DOCKER_IMAGE, "."]
+        build_process = subprocess.run(
+            build_cmd,
+            cwd=cli_dir,
+            capture_output=True, text=True, check=False # Don't raise on error yet
+        )
+
+        # Check for build errors
+        if build_process.returncode != 0:
+            # Check specifically for permission error
+            if "permission denied" in build_process.stderr.lower() and "docker.sock" in build_process.stderr.lower():
+                 console.print("[bold red]Docker Permission Error Detected![/bold red]")
+                 console.print("[bold yellow]The current user does not have permission to access the Docker daemon socket.[/bold yellow]")
+                 console.print("[bold yellow]On Linux, try adding your user to the 'docker' group:[/bold yellow]")
+                 print("  1. Run: [cyan]sudo usermod -aG docker $USER[/cyan]")
+                 print("  2. Log out and log back in, or run: [cyan]newgrp docker[/cyan] in your terminal.")
+                 print("[bold yellow]Then, try running the coral command again.[/bold yellow]")
+                 # Exit cleanly after printing the specific error message
+                 raise typer.Exit(1) # Use typer.Exit to stop execution here
+            else:
+                # Print generic build error
+                console.print(f"[bold red]Error building Docker image (Return Code: {build_process.returncode}):[/bold red]")
+                console.print(build_process.stderr)
+                raise typer.Exit(1) # Exit on generic build error too
+
+        console.print("[green]Docker image built successfully.[/green]")
+
+    except FileNotFoundError:
+         console.print("[bold red]Error: 'docker' command not found. Is Docker installed and in your PATH?[/bold red]")
+         raise typer.Exit(1)
+    except typer.Exit: # Re-raise typer.Exit to ensure it propagates correctly
+        raise
+    except Exception as e:
+         # Catch other potential exceptions during build setup or execution
+         console.print(f"[bold red]An unexpected error occurred during Docker build setup or execution: {e}[/bold red]")
+         raise typer.Exit(1)
+
+    # --- Run the Docker container ---
+    container_name = "coral-chatroom-server"
+    console.print(f"Running Docker container '{container_name}' from image '{CORAL_SERVER_DOCKER_IMAGE}'...")
+    try:
+        # Stop and remove existing container with the same name, if any
+        stop_cmd = ["docker", "stop", container_name]
+        remove_cmd = ["docker", "rm", container_name]
+        subprocess.run(stop_cmd, capture_output=True) # Ignore errors if container doesn't exist
+        subprocess.run(remove_cmd, capture_output=True)
+
+        run_cmd = [
+            "docker", "run",
+            "--rm", # Remove container when it exits
+            "-d",   # Run in detached mode (background)
+            "-p", f"{port}:{DEFAULT_CHATROOM_PORT}", # Map host port to container port
+            "--name", container_name,
+            CORAL_SERVER_DOCKER_IMAGE
+        ]
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        console.print(f"[bold green]✅ Coral chatroom server started in Docker container '{container_name}'.[/bold green]")
+        console.print(f"[bold green]   Host Port: {port}[/bold green]")
+        console.print(f"[bold green]   Container Port: {DEFAULT_CHATROOM_PORT}[/bold green]")
+        console.print(f"[bold green]   Server URL (Docker): http://localhost:{port}/sse[/bold green]")
+        console.print(f"[bold yellow]To view logs: docker logs {container_name}[/bold yellow]")
+        console.print(f"[bold yellow]To stop: docker stop {container_name}[/bold yellow]")
+
+    except FileNotFoundError:
+         console.print("[bold red]Error: 'docker' command not found. Is Docker installed and in your PATH?[/bold red]")
+         raise typer.Exit(1)
+    except subprocess.CalledProcessError as e:
+        console.print(f"[bold red]Error running Docker container: {e}[/bold red]")
+        if e.stderr:
+            console.print(f"[bold red]Stderr:[/bold red]\n{e.stderr}")
+        raise typer.Exit(1)
+    except Exception as e:
+         console.print(f"[bold red]An unexpected error occurred during Docker run: {e}[/bold red]")
+         raise typer.Exit(1)
+
+
+def get_server_jar() -> Optional[str]:
+    # ... (get_server_jar implementation - ensure it finds the correct JAR name, e.g., coral-server-1.0-SNAPSHOT.jar) ...
+    # Adjust the dev_jar_path if the snapshot name changes
+    script_dir = Path(__file__).parent
+    # Make sure this name matches the actual built JAR name
+    jar_name = "coral-server.jar"
+    dev_jar_path = script_dir.parent / "coral-server" / "build" / "libs" / jar_name
+
     locations = [
-        Path(__file__).parent / "binaries" / "coral-server.jar",
-        Path.home() / ".coral" / "bin" / "coral-server.jar",
-        # Add other potential locations if needed, e.g., relative to project root
+        Path(__file__).parent / "binaries" / jar_name,
+        Path.home() / ".coral" / "bin" / jar_name,
     ]
 
     for loc in locations:
         if loc.exists() and loc.is_file():
-            return str(loc) # Return the first one found
+            return str(loc)
 
-    # If not found, try searching relative to the script's parent dir (useful for dev)
-    script_dir = Path(__file__).parent
-    dev_jar_path = script_dir.parent / "coral-server" / "build" / "libs" / "agent-fuzzy-p2p-tools-1.0-SNAPSHOT.jar" # Adjust name if needed
     if dev_jar_path.exists() and dev_jar_path.is_file():
-        # Optionally copy it to a standard location or just use it directly
-        # Let's copy it to the .coral dir for consistency if it doesn't exist there
         config_dir = Path.home() / ".coral" / "bin"
-        config_jar = config_dir / "coral-server.jar"
+        config_jar = config_dir / jar_name
         if not config_jar.exists():
             try:
                 console.print(f"Found development JAR, copying to {config_jar}...")
@@ -246,32 +389,21 @@ def get_server_jar() -> Optional[str]: # Return Optional[str]
                 return str(config_jar)
             except Exception as e:
                 console.print(f"[bold yellow]Warning: Could not copy dev JAR: {e}[/bold yellow]")
-                # Fallback to using the dev path directly if copy fails
                 return str(dev_jar_path)
         else:
-             # If config_jar already exists, prefer it
              return str(config_jar)
 
-
-    # Not found anywhere
-    console.print("[bold red]Server JAR 'coral-server.jar' not found in standard locations:[/bold red]")
-    for loc in locations:
-        console.print(f"- {loc}")
-    console.print(f"- {dev_jar_path} (development build)")
-    console.print("[bold yellow]Consider running './gradlew build' in the 'coral-server' directory or placing the JAR manually.[/bold yellow]")
+    console.print(f"[bold red]Server JAR '{jar_name}' not found in standard locations:[/bold red]")
+    # ... (print locations) ...
     return None
 
-def get_pid_file_path() -> Path:
-    """Get the path to the PID file"""
-    config_dir = Path.home() / ".coral"
-    config_dir.mkdir(exist_ok=True)
-    return config_dir / "server.pid"
 
-
-def get_server_dir() -> Path:
-    """Get the path to the server directory"""
-    # The server directory is relative to this file
-    return Path(__file__).parent.parent / "coral-server"
+def get_server_dir() -> Optional[Path]: # Return Optional[Path]
+    """Get the path to the server directory relative to the CLI script."""
+    server_dir = Path(__file__).resolve().parent.parent / "coral-server"
+    if server_dir.is_dir():
+        return server_dir
+    return None
 
 def is_java_installed():
     """Check if Java is installed"""
