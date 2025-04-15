@@ -1,21 +1,30 @@
 [project]
 name = "coral_cli"
 version = "0.1.0"
-description = "CLI for interacting with the Coral Protocol"
+description = "CLI for interacting with the Coral Protocol and onboarding coral agents onto the network"
 authors = [
     {name = "KenjiPcx", email = "ken.pcx@outlook.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "typer (>=0.15.2,<0.16.0)",
     "rich (>=14.0.0,<15.0.0)",
-    "questionary (>=2.1.0,<3.0.0)"
+    "questionary (>=2.1.0,<3.0.0)",
+    "camel-ai[web-tools] (==0.2.40)",
+    "asyncio (>=3.4.3,<4.0.0)",
+    "pydantic (>=2.9.0,<3.0.0)",
+    "docker (>=7.1.0,<8.0.0)",
+    "gitpython (>=3.1.44,<4.0.0)",
+    "numpy (>=2.2.4,<3.0.0)",
+    "pandas (>=2.2.3,<3.0.0)"
 ]
 
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.5"
+black = "^25.1.0"
+mypy = "^1.15.0"
+
 
 [tool.poetry.scripts]
 coral = "coral_cli.cli:main"
@@ -26,3 +35,7 @@ include = [
     "coral_cli/templates/**/*",
     "coral-server/**/*"
 ]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
