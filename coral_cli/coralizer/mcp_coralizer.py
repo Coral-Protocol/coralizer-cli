@@ -88,7 +88,7 @@ async def main():
             
             # Main agent loop
             print("Starting main agent loop...")
-            while True:
+            for i in range(50):  #This should be infinite, but for this prototype we limit it to 50 to avoid accidental API fees
                 try:
                     # A more specific prompt might be needed depending on the agent's role
                     # This prompt asks the agent to check for mentions and respond.
