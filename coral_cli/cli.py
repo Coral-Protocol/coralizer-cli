@@ -26,6 +26,7 @@ except ImportError:
     sys.path.append(str(Path(__file__).parent.parent))
     from coral_cli.coralizer.mcp_coralizer import MCPCoralizer
 
+from coral_cli.interface_agent import get_interface_agent_script
 from coral_cli.templates import generate_template
 
 # Import the new coralizer
@@ -36,6 +37,19 @@ except ImportError:
     sys.path.append(str(Path(__file__).parent.parent))
     from coral_cli.coralizer.mcp_coralizer import MCPCoralizer
     from coral_cli.coralizer.github_coralizer import GitHubCoralizer
+
+# Ensure CAMEL imports are checked or available
+try:
+    from camel.agents import ChatAgent
+    from camel.models import ModelFactory
+    from camel.toolkits import HumanToolkit, MCPToolkit
+    from camel.toolkits.mcp_toolkit import MCPClient
+    from camel.types import ModelPlatformType, ModelType
+except ImportError:
+    print("[bold red]Error: camel-ai library is not installed or accessible.[/bold red]")
+    print("[bold yellow]Please run 'poetry install' to install dependencies.[/bold yellow]")
+    # Set to None to prevent errors later if checks fail
+    ChatAgent = ModelFactory = HumanToolkit = MCPToolkit = MCPClient = ModelPlatformType = ModelType = None
 
 app = typer.Typer(
     name="coral",
@@ -744,6 +758,76 @@ def coralize_github(
         if coralizer: coralizer.cleanup()
         raise typer.Exit(1)
 
+
+@app.command("start-interface")
+def start_interface(
+    agent_id: str = typer.Option("UserInterfaceAgent", "--agent-id", "-id", help="Unique ID for the interface agent."),
+    coral_url: str = typer.Option("http://localhost:3001/sse", "--coral-url", "-c", help="URL of the Coral chatroom server."),
+    openai_api_key: Optional[str] = typer.Option(None, envvar="OPENAI_API_KEY", help="OpenAI API Key (reads from env var OPENAI_API_KEY by default)."),
+):
+    """
+    Start a standard CAMEL AI agent to interact with the user and the Coral network.
+    """
+    console.print(f"[bold blue]🐠 Starting User Interface Agent: {agent_id}[/bold blue]")
+
+    # --- Prerequisite Checks ---
+    console.print("Checking prerequisites...")
+    resolved_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+    if not resolved_api_key:
+        console.print("[bold red]Error: OPENAI_API_KEY is required but not set.[/bold red]")
+        console.print("[bold yellow]Please set the OPENAI_API_KEY environment variable or use the --openai-api-key option.[/bold yellow]")
+        raise typer.Exit(1)
+
+    console.print("[green]Prerequisites check passed.[/green]")
+
+    # --- Generate Script ---
+    try:
+        interface_script = get_interface_agent_script(coral_url, agent_id)
+    except Exception as e:
+         console.print(f"[bold red]Error generating interface agent script: {e}[/bold red]")
+         raise typer.Exit(1)
+
+    # --- Execute Script Locally ---
+    console.print("Attempting to run interface agent locally...")
+    script_path = None # Initialize script_path
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding='utf-8') as tmp_script:
+            tmp_script.write(interface_script)
+            script_path = tmp_script.name
+
+        console.print(f"Running agent script: {script_path}")
+        console.print("[bold yellow]Press Ctrl+C to stop the agent.[/bold yellow]")
+        process = None
+
+        # Run using the same Python interpreter that's running the CLI
+        cmd = [sys.executable, script_path]
+        # Pass environment variables explicitly (API key)
+        # Coral URL and Agent ID are embedded in the script now
+        env = os.environ.copy()
+        env["OPENAI_API_KEY"] = resolved_api_key # Ensure the key is passed
+
+        process = subprocess.Popen(cmd, env=env)
+        process.wait() # Wait for the script to finish or be interrupted
+
+    except KeyboardInterrupt:
+        console.print("\n[bold yellow]Stopping interface agent...[/bold yellow]")
+        if process:
+            process.terminate() # Send SIGTERM
+            try:
+                process.wait(timeout=5) # Wait a bit
+            except subprocess.TimeoutExpired:
+                process.kill() # Force kill if needed
+        console.print("[bold green]Interface agent stopped.[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error running script locally: {e}[/bold red]")
+    finally:
+        # Clean up the temporary script file
+        if script_path and os.path.exists(script_path):
+            try:
+                os.remove(script_path)
+                # print(f"Cleaned up temp script: {script_path}") # Optional debug msg
+            except OSError as e:
+                 console.print(f"[bold yellow]Warning: Could not delete temporary script {script_path}: {e}[/bold yellow]")
 
 # --- Boilerplate ---
 
