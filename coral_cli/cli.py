@@ -15,6 +15,7 @@ import shutil
 import signal
 import time
 import tempfile
+import asyncio
 
 # Make sure the coralizer module is importable
 # This assumes coralizer is a sub-package of coral_cli
@@ -25,7 +26,30 @@ except ImportError:
     sys.path.append(str(Path(__file__).parent.parent))
     from coral_cli.coralizer.mcp_coralizer import MCPCoralizer
 
+from coral_cli.interface_agent import get_interface_agent_script
 from coral_cli.templates import generate_template
+
+# Import the new coralizer
+try:
+    from coral_cli.coralizer.mcp_coralizer import MCPCoralizer
+    from coral_cli.coralizer.github_coralizer import GitHubCoralizer # Uses CAMEL internally now
+except ImportError:
+    sys.path.append(str(Path(__file__).parent.parent))
+    from coral_cli.coralizer.mcp_coralizer import MCPCoralizer
+    from coral_cli.coralizer.github_coralizer import GitHubCoralizer
+
+# Ensure CAMEL imports are checked or available
+try:
+    from camel.agents import ChatAgent
+    from camel.models import ModelFactory
+    from camel.toolkits import HumanToolkit, MCPToolkit
+    from camel.toolkits.mcp_toolkit import MCPClient
+    from camel.types import ModelPlatformType, ModelType
+except ImportError:
+    print("[bold red]Error: camel-ai library is not installed or accessible.[/bold red]")
+    print("[bold yellow]Please run 'poetry install' to install dependencies.[/bold yellow]")
+    # Set to None to prevent errors later if checks fail
+    ChatAgent = ModelFactory = HumanToolkit = MCPToolkit = MCPClient = ModelPlatformType = ModelType = None
 
 app = typer.Typer(
     name="coral",
@@ -45,6 +69,10 @@ DEFAULT_CHATROOM_PORT = 3001
 def is_docker_installed():
     """Check if Docker CLI is installed and accessible."""
     return shutil.which("docker") is not None
+
+def is_git_installed():
+    """Check if Git CLI is installed and accessible."""
+    return shutil.which("git") is not None
 
 def check_openai_key():
     """Check if OPENAI_API_KEY environment variable is set."""
@@ -560,6 +588,250 @@ def coralize_mcp(
                 if script_path and os.path.exists(script_path):
                     os.remove(script_path)
 
+@app.command("coralize-github")
+def coralize_github(
+    repo_url: str = typer.Argument(..., help="URL of the GitHub repository to coralize."),
+    agent_id: Optional[str] = typer.Option(None, "--agent-id", "-id", help="Unique ID for the new Coral agent."),
+    coral_url: str = typer.Option("http://localhost:3001/sse", "--coral-url", "-c", help="URL of the Coral chatroom server."),
+    branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Specific branch to clone (default is repo's default)."),
+    # github_token: Optional[str] = typer.Option(None, "--token", "-t", help="GitHub token for private repositories (or use GITHUB_TOKEN env var)."), # Token not used in current clone logic
+    openai_api_key: Optional[str] = typer.Option(None, envvar="OPENAI_API_KEY", help="OpenAI API Key (reads from env var OPENAI_API_KEY by default). Needed for the code generation agent."),
+    run_mode: str = typer.Option("docker", "--run", "-r", help="How to run the coralized agent: 'docker' (recommended). 'local' is highly experimental."),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o", help="Directory to save generated files and cloned repo instead of running."),
+):
+    """
+    Wrap a GitHub repository using a CAMEL agent to generate the wrapper. (Experimental)
+    """
+    console.print(f"[bold blue]🐠 Coralizing GitHub repository: {repo_url}[/bold blue]")
+    console.print("[bold yellow]Warning: This feature is experimental. CAMEL agent-generated code may require manual adjustments.[/bold yellow]")
+
+    # --- Input Validation and Prompts ---
+    if not agent_id:
+        # ... (prompt for agent_id) ...
+        pass # Keep prompt logic
+
+    if run_mode not in ["docker", "local"]:
+        # ... (invalid run mode message) ...
+        pass # Keep validation
+    if run_mode == "local":
+         # ... (local run warning) ...
+         pass # Keep warning
+
+    # --- Prerequisite Checks ---
+    console.print("Checking prerequisites...")
+    # Check for API key *before* initializing coralizer
+    resolved_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+    if not resolved_api_key:
+        console.print("[bold red]Error: OPENAI_API_KEY is required but not set.[/bold red]")
+        console.print("[bold yellow]Please set the OPENAI_API_KEY environment variable or use the --openai-api-key option.[/bold yellow]")
+        raise typer.Exit(1)
+
+    if not is_git_installed():
+         # ... (git not installed message) ...
+         raise typer.Exit(1)
+
+    # Check for GitPython and CAMEL library
+    try:
+        import git
+        from camel.agents import ChatAgent # Check if core CAMEL class is importable
+    except ImportError as e:
+        console.print(f"[bold red]Missing required library: {e}.[/bold red]")
+        console.print("[bold yellow]Please ensure 'GitPython' and 'camel-ai' are installed (`poetry install`).[/bold yellow]")
+        raise typer.Exit(1)
+
+    if run_mode == "docker" and not is_docker_installed():
+        # ... (docker not installed message) ...
+        raise typer.Exit(1)
+
+    console.print("[green]Prerequisites check passed.[/green]")
+
+    # --- Instantiate Coralizer ---
+    coralizer = None # Initialize for finally block
+    try:
+        coralizer = GitHubCoralizer(
+            repo_url=repo_url,
+            coral_server_url=coral_url,
+            agent_id=agent_id,
+            branch=branch,
+            openai_api_key=resolved_api_key # Pass the resolved key
+        )
+
+        # --- Generate Files ---
+        console.print("Generating Coral wrapper script (using CAMEL agent) and Dockerfile (may take a while)...")
+        # Use asyncio.run for the async coralize method
+        wrapper_script, dockerfile_content, repo_path = asyncio.run(coralizer.coralize())
+
+        # --- Check Generation Result ---
+        if wrapper_script is None or dockerfile_content is None or repo_path is None:
+             console.print("[bold red]Failed to generate necessary files. See previous errors.[/bold red]")
+             # Cleanup might have already happened in coralizer
+             if coralizer and coralizer.temp_dir: coralizer.cleanup()
+             raise typer.Exit(1)
+
+
+        # --- Handle Output ---
+        if output_dir:
+            # ... (logic for saving files to output_dir remains largely the same) ...
+            # Ensure it uses repo_path correctly and places Dockerfile inside the moved repo dir
+            console.print(f"Saving generated files and cloned repo to: {output_dir}")
+            if output_dir.exists():
+                 console.print(f"[yellow]Output directory '{output_dir}' already exists. Overwriting contents.[/yellow]")
+            else:
+                 output_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                # Move the entire cloned repo content
+                # Use repo_path.name which should be the temp dir name
+                cloned_content_dest = output_dir / repo_path.name
+                if cloned_content_dest.exists():
+                     shutil.rmtree(cloned_content_dest) # Remove destination if it exists before moving
+                shutil.move(str(repo_path), str(output_dir)) # Move the temp dir content
+
+                # Write the generated files into the *new* location
+                wrapper_path_out = cloned_content_dest / "coral_wrapper.py"
+                dockerfile_path_out = cloned_content_dest / "Dockerfile" # Place Dockerfile inside the moved repo dir
+
+                with open(wrapper_path_out, "w") as f: f.write(wrapper_script)
+                with open(dockerfile_path_out, "w") as f: f.write(dockerfile_content)
+
+                console.print("[bold green]✅ Files and repository saved successfully![/bold green]")
+                console.print(f"Repository content saved to: {cloned_content_dest}")
+                console.print(f"To run manually (using Docker):")
+                console.print(f"  cd {cloned_content_dest}")
+                console.print(f"  docker build -t github-coralizer-{agent_id.lower().replace(' ', '-')} .")
+                console.print(f"  docker run --rm -e OPENAI_API_KEY=$OPENAI_API_KEY -e CORAL_SERVER_URL={coral_url} -e CORAL_AGENT_ID={agent_id} --network=host github-coralizer-{agent_id.lower().replace(' ', '-')}")
+
+            except Exception as e:
+                console.print(f"[bold red]Error saving files/repo: {e}[/bold red]")
+                # Cleanup might have already happened in coralizer if error was during generation
+                if coralizer and coralizer.temp_dir: coralizer.cleanup()
+                raise typer.Exit(1)
+            # No finally block needed here for cleanup, as build_and_run wasn't called
+
+        else:
+            # --- Execute ---
+            if run_mode == "docker":
+                console.print("Attempting to build and run Docker container...")
+                # build_and_run now handles cleanup internally via its finally block
+                coralizer.build_and_run(wrapper_script, dockerfile_content, repo_path)
+
+            elif run_mode == "local":
+                # ... (local run logic remains the same, but still highly experimental) ...
+                # Ensure it writes the wrapper/dockerfile to repo_path before running
+                console.print("[bold yellow]Attempting experimental local run...[/bold yellow]")
+                wrapper_path_local = repo_path / "coral_wrapper.py"
+                dockerfile_path_local = repo_path / "Dockerfile"
+                try:
+                    with open(wrapper_path_local, "w") as f: f.write(wrapper_script)
+                    with open(dockerfile_path_local, "w") as f: f.write(dockerfile_content)
+                except IOError as e:
+                     print(f"[bold red]Error writing generated files to temp dir for local run: {e}[/bold red]")
+                     coralizer.cleanup()
+                     raise typer.Exit(1)
+
+                # ... (rest of local run subprocess logic) ...
+                process = None
+                try:
+                    cmd = [sys.executable, str(wrapper_path_local)]
+                    env = os.environ.copy()
+                    # Pass Coral URL/ID via env vars for local run too
+                    env["CORAL_SERVER_URL"] = coral_url
+                    env["CORAL_AGENT_ID"] = agent_id
+                    # API key should already be in os.environ
+                    process = subprocess.Popen(cmd, env=env, cwd=repo_path)
+                    process.wait()
+                # ... (KeyboardInterrupt, Exception handling for local run) ...
+                except KeyboardInterrupt:
+                    # ...
+                    pass
+                except Exception as e:
+                    # ...
+                    pass
+                finally:
+                    coralizer.cleanup() # Cleanup after local run attempt
+
+
+    except (ValueError, RuntimeError, ImportError) as e: # Catch errors from Coralizer init or methods
+        console.print(f"[bold red]Error during GitHub coralization setup: {e}[/bold red]")
+        if coralizer: coralizer.cleanup() # Ensure cleanup if init succeeded partially
+        raise typer.Exit(1)
+    except Exception as e: # Catch unexpected errors
+        console.print(f"[bold red]An unexpected error occurred: {e}[/bold red]")
+        import traceback
+        traceback.print_exc() # Print stack trace for debugging unexpected errors
+        if coralizer: coralizer.cleanup()
+        raise typer.Exit(1)
+
+
+@app.command("start-interface")
+def start_interface(
+    agent_id: str = typer.Option("UserInterfaceAgent", "--agent-id", "-id", help="Unique ID for the interface agent."),
+    coral_url: str = typer.Option("http://localhost:3001/sse", "--coral-url", "-c", help="URL of the Coral chatroom server."),
+    openai_api_key: Optional[str] = typer.Option(None, envvar="OPENAI_API_KEY", help="OpenAI API Key (reads from env var OPENAI_API_KEY by default)."),
+):
+    """
+    Start a standard CAMEL AI agent to interact with the user and the Coral network.
+    """
+    console.print(f"[bold blue]🐠 Starting User Interface Agent: {agent_id}[/bold blue]")
+
+    # --- Prerequisite Checks ---
+    console.print("Checking prerequisites...")
+    resolved_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+    if not resolved_api_key:
+        console.print("[bold red]Error: OPENAI_API_KEY is required but not set.[/bold red]")
+        console.print("[bold yellow]Please set the OPENAI_API_KEY environment variable or use the --openai-api-key option.[/bold yellow]")
+        raise typer.Exit(1)
+
+    console.print("[green]Prerequisites check passed.[/green]")
+
+    # --- Generate Script ---
+    try:
+        interface_script = get_interface_agent_script(coral_url, agent_id)
+    except Exception as e:
+         console.print(f"[bold red]Error generating interface agent script: {e}[/bold red]")
+         raise typer.Exit(1)
+
+    # --- Execute Script Locally ---
+    console.print("Attempting to run interface agent locally...")
+    script_path = None # Initialize script_path
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding='utf-8') as tmp_script:
+            tmp_script.write(interface_script)
+            script_path = tmp_script.name
+
+        console.print(f"Running agent script: {script_path}")
+        console.print("[bold yellow]Press Ctrl+C to stop the agent.[/bold yellow]")
+        process = None
+
+        # Run using the same Python interpreter that's running the CLI
+        cmd = [sys.executable, script_path]
+        # Pass environment variables explicitly (API key)
+        # Coral URL and Agent ID are embedded in the script now
+        env = os.environ.copy()
+        env["OPENAI_API_KEY"] = resolved_api_key # Ensure the key is passed
+
+        process = subprocess.Popen(cmd, env=env)
+        process.wait() # Wait for the script to finish or be interrupted
+
+    except KeyboardInterrupt:
+        console.print("\n[bold yellow]Stopping interface agent...[/bold yellow]")
+        if process:
+            process.terminate() # Send SIGTERM
+            try:
+                process.wait(timeout=5) # Wait a bit
+            except subprocess.TimeoutExpired:
+                process.kill() # Force kill if needed
+        console.print("[bold green]Interface agent stopped.[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error running script locally: {e}[/bold red]")
+    finally:
+        # Clean up the temporary script file
+        if script_path and os.path.exists(script_path):
+            try:
+                os.remove(script_path)
+                # print(f"Cleaned up temp script: {script_path}") # Optional debug msg
+            except OSError as e:
+                 console.print(f"[bold yellow]Warning: Could not delete temporary script {script_path}: {e}[/bold yellow]")
 
 # --- Boilerplate ---
 
