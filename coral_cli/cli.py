@@ -70,6 +70,10 @@ def is_docker_installed():
     """Check if Docker CLI is installed and accessible."""
     return shutil.which("docker") is not None
 
+def is_git_installed():
+    """Check if Git CLI is installed and accessible."""
+    return shutil.which("git") is not None
+
 def check_openai_key():
     """Check if OPENAI_API_KEY environment variable is set."""
     return os.getenv("OPENAI_API_KEY") is not None

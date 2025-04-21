@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import shutil
 import time
 import re # For parsing agent output
+import json # For parsing potential JSON output from agent
 
 # GitPython for cloning
 try:
@@ -26,143 +27,31 @@ except ImportError:
     ChatAgent = ModelFactory = ModelPlatformType = ModelType = None # Set to None
 
 # Max context size (in characters) to feed to the generator agent
-MAX_CODE_CONTEXT_CHARS = 15000 # Example limit, depends on model
-MAX_TREE_CHARS = 2000 # Limit for file tree representation
+MAX_CODE_CONTEXT_CHARS = 150000 # Example limit, depends on model
+MAX_TREE_CHARS = 200000 # Limit for file tree representation
 
-example_output = """
-import asyncio
-import os
-from time import sleep
-import sys
-
-from camel.agents import ChatAgent
-from camel.models import ModelFactory
-from camel.toolkits import MCPToolkit
-from camel.toolkits.mcp_toolkit import MCPClient
-from camel.types import ModelPlatformType, ModelType
-
-# Ensure OPENAI_API_KEY is set
-if "OPENAI_API_KEY" not in os.environ:
-    print("Error: OPENAI_API_KEY environment variable not set.")
-    sys.exit(1)
-
-def get_tools_description():
-    return \"\"\"
-        You have access to communication tools to interact with other agents.
-        
-        Before using the tools, you need to register yourself using the register tool. Name yourself with a name that describes your speciality well. Do not be too generic. For example, if you are a search agent, you can name yourself "search_agent".
-        
-        If there are no other agents, remember to re-list the agents periodically using the list tool.
-        
-        You should know that the user can't see any messages you send, you are expected to be autonomous and respond to the user only when you have finished working with other agents, using tools specifically for that.
-        
-        You can emit as many messages as you like before using that tool when you are finished or absolutely need user input. You are on a loop and will see a "user" message every 4 seconds, but it's not really from the user.
-        
-        Run the wait for mention tool when you are ready to receive a message from another agent. This is the preferred way to wait for messages from other agents.
-        
-        You'll only see messages from other agents since you last called the wait for mention tool. Remember to call this periodically.
-        
-        Don't try to guess any numbers or facts, only use reliable sources. If you are unsure, ask other agents for help.
-    \"\"\"
-
-def get_user_message():
-    return "[automated] continue collaborating with other agents"
-
-async def main():
-    # Connect to Coral server
-    coral_server = MCPClient("{self.coral_server_url}")
-    coral_toolkit = MCPToolkit([coral_server])
-    
-    # Connect to target MCP server
-    target_server = MCPClient("{self.target_mcp_url}")
-    target_toolkit = MCPToolkit([target_server])
-
-    async with coral_toolkit.connection() as connected_coral_toolkit:
-        async with target_toolkit.connection() as connected_target_toolkit:
-            # Create agent with tools from both servers
-            camel_agent = await create_agent(connected_coral_toolkit, connected_target_toolkit)
-            
-            # Register with the specified agent ID
-            print(f"Attempting to register agent as '{self.agent_id}'...")
-            await camel_agent.astep("Register as {self.agent_id}")
-            print(f"Agent '{self.agent_id}' registered.")
-            
-            # Main agent loop
-            print("Starting main agent loop...")
-            while True:
-                try:
-                    # A more specific prompt might be needed depending on the agent's role
-                    # This prompt asks the agent to check for mentions and respond.
-                    prompt = get_user_message()
-                    resp = await camel_agent.astep(prompt)
-                    if resp and resp.msgs:
-                        print(f"Agent response: {{resp.msgs[0].content[:150]}}...")
-                    else:
-                        print("Agent did not produce a response message.")
-                    await asyncio.sleep(7) # Increased sleep time slightly
-                except asyncio.CancelledError:
-                    print("Agent loop cancelled.")
-                    break
-                except Exception as e:
-                    print(f"Error in agent loop: {{e}}")
-                    print("Retrying in 30 seconds...")
-                    await asyncio.sleep(30)
-
-async def create_agent(connected_coral_toolkit, connected_target_toolkit):
-    # Combine tools from both toolkits
-    print("Fetching tools from Coral server...")
-    coral_tools = connected_coral_toolkit.get_tools()
-    print(f"Found {{len(coral_tools)}} tools from Coral.")
-
-    print("Fetching tools from target MCP server...")
-    target_tools = connected_target_toolkit.get_tools()
-    print(f"Found {{len(target_tools)}} tools from target MCP.")
-
-    tools = coral_tools + target_tools
-    print(f"Total tools available: {{len(tools)}}")
-    # print(f"Available tools: {{[tool.name for tool in tools]}}") # Uncomment for debugging
-
-    # System message
-    sys_msg = '''{self.system_message}'''
-    sys_msg += f\"\"\"Here are the guidelines for using the communication tools:
-            {{get_tools_description()}}
-            \"\"\"
-            
-    # Create the model
-    # Ensure model_config_dict is correctly formatted
-    model_config_dict = {model_config_str}
-
-    print(f"Creating model with config: {{model_config_dict}}")
-    model = ModelFactory.create(
-        model_platform=ModelPlatformType.OPENAI,
-        model_type=ModelType.GPT_4O, # Consider making this configurable
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model_config_dict=model_config_dict,
-    )
-    
-    # Create the agent
-    print("Creating ChatAgent...")
-    agent = ChatAgent(
-        system_message=sys_msg,
-        model=model,
-        tools=tools,
-        message_window_size=4096 * 50, # Consider making this configurable
-        token_limit=20000 # Consider making this configurable
-    )
-    agent.reset()
-    agent.memory.clear()
-    print("Agent created successfully.")
-    return agent
-
-if __name__ == "__main__":
-    print("Starting Coralizer wrapper script...")
+# --- Helper Function ---
+async def _run_camel_agent_step(system_prompt: str, user_prompt: str, api_key: str, model_type = ModelType.GPT_4O) -> Optional[str]:
+    """Helper to run a single step of a temporary CAMEL agent."""
+    if not ChatAgent: return None # Guard against import failure
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\\nScript interrupted by user.")
-    finally:
-        print("Coralizer wrapper script finished.")
-"""
+        agent_model = ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI,
+            model_type=model_type,
+            api_key=api_key,
+            model_config_dict={"temperature": 0.1},
+        )
+        agent = ChatAgent(system_message=system_prompt, model=agent_model)
+        agent.reset()
+        response = await agent.astep(user_prompt)
+        if response and response.msgs:
+            return response.msgs[0].content
+        else:
+            print("Warning: CAMEL agent step returned no message.")
+            return None
+    except Exception as e:
+        print(f"Error during CAMEL agent step: {e}")
+        return None
 
 class GitHubCoralizer:
     def __init__(self,
@@ -170,7 +59,7 @@ class GitHubCoralizer:
                  coral_server_url: str,
                  agent_id: str,
                  branch: Optional[str] = None,
-                 openai_api_key: Optional[str] = None): # API key needed for the CAMEL agent
+                 openai_api_key: Optional[str] = None):
         if not git:
             raise ImportError("GitPython is required but not installed.")
         if not ChatAgent:
@@ -182,9 +71,8 @@ class GitHubCoralizer:
         self.branch = branch
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         if not self.openai_api_key:
-            # The CAMEL agent needs the key to function
-            raise ValueError("OpenAI API key is required for the code generation agent. Set OPENAI_API_KEY environment variable or pass it.")
-        self.temp_dir = None # To store the path to the temporary directory
+            raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it.")
+        self.temp_dir = None
 
     async def _clone_repo(self) -> Path:
         """Clones the repository into a temporary directory."""
@@ -195,7 +83,6 @@ class GitHubCoralizer:
             clone_options = {}
             if self.branch:
                 clone_options['branch'] = self.branch
-            # TODO: Add authentication for private repos if needed (requires more complex GitPython setup)
             git.Repo.clone_from(self.repo_url, repo_path, **clone_options)
             print("Repository cloned successfully.")
             return repo_path
@@ -207,87 +94,117 @@ class GitHubCoralizer:
             raise RuntimeError(f"An unexpected error occurred during cloning: {e}") from e
 
     def _get_file_tree(self, repo_path: Path) -> str:
-        """Generates a simplified directory tree structure."""
+        """Generates a simplified directory tree structure, prioritizing Python files."""
         print("Generating file tree...")
         tree_str = ""
-        file_count = 0
-        for root, dirs, files in os.walk(repo_path):
-            # Skip .git directory
-            if '.git' in dirs:
-                dirs.remove('.git')
+        entries = []
+        for item in repo_path.rglob('*'):
+            if '.git' in item.parts:
+                continue # Skip .git contents
 
-            level = root.replace(str(repo_path), '').count(os.sep)
-            indent = ' ' * 4 * level
-            tree_str += f"{indent}{os.path.basename(root)}/\n"
-            sub_indent = ' ' * 4 * (level + 1)
-            for f in files:
-                # Optional: Filter for specific file types (e.g., .py, requirements.txt)
-                # if f.endswith(".py") or f == "requirements.txt":
-                tree_str += f"{sub_indent}{f}\n"
-                file_count += 1
-                if len(tree_str) > MAX_TREE_CHARS:
-                     print(f"Warning: File tree truncated at {MAX_TREE_CHARS} characters.")
-                     tree_str += f"{sub_indent}...\n"
-                     return tree_str # Return truncated tree
+            depth = len(item.relative_to(repo_path).parts) -1
+            indent = '  ' * depth
+            if item.is_dir():
+                entries.append(f"{indent}└─ {item.name}/")
+            elif item.is_file():
+                # Optional: Prioritize showing .py files, requirements, etc.
+                if item.name.endswith('.py') or item.name in ['requirements.txt', 'pyproject.toml', 'setup.py']:
+                     entries.append(f"{indent}└─ {item.name}")
+                # else: # Option to hide non-essential files
+                #     entries.append(f"{indent}└─ (other file)") # Placeholder
 
-        print(f"Generated tree for {file_count} files.")
+        tree_str = "\n".join(entries)
+
+        if len(tree_str) > MAX_TREE_CHARS:
+            print(f"Warning: File tree truncated at {MAX_TREE_CHARS} characters.")
+            tree_str = tree_str[:MAX_TREE_CHARS] + "\n..."
+
+        print(f"Generated file tree ({len(tree_str)} chars).")
         return tree_str
 
+    async def _identify_entry_points_with_camel_agent(self, file_tree: str) -> List[str]:
+        """Uses a CAMEL agent to suggest potential entry point files based on the tree."""
+        print("Asking CAMEL agent to identify potential entry points...")
+        system_prompt = """
+You are an expert code analyzer. Your task is to identify the most likely main entry point Python files for an application or agent based on the provided file structure. Look for common names like `main.py`, `app.py`, `run.py`, `agent.py`, or files located at the root or in relevant subdirectories (e.g., `src/`, `app/`).
 
-    def _get_code_context(self, repo_path: Path) -> str:
-        """Reads relevant code files to create context for the AI."""
-        print("Reading Python files for AI context...")
+Analyze the following file tree:
+```
+{file_tree}
+```
+
+List the top 3-5 most probable Python entry point file paths relative to the repository root. Output the result as a JSON list of strings. Example: ["main.py", "src/agent.py", "app/run.py"]
+Respond ONLY with the JSON list.
+"""
+        user_prompt = f"Identify the most likely Python entry point files from this file tree:\n{file_tree}\nRespond only with a JSON list of relative file paths."
+
+        response = await _run_camel_agent_step(system_prompt, user_prompt, self.openai_api_key, ModelType.GPT_4O) # Use cheaper model for analysis
+
+        if not response:
+            print("Warning: Agent failed to identify entry points. Falling back to default candidates.")
+            return ["main.py", "app.py", "agent.py", "run.py"] # Default fallback
+
+        try:
+            # Attempt to parse JSON list from response
+            # Clean potential markdown formatting
+            if response.startswith("```json"):
+                 response = response.split("```json\n", 1)[1].split("\n```", 1)[0]
+            elif response.startswith("```"):
+                 response = response.split("```\n", 1)[1].split("\n```", 1)[0]
+
+            candidate_files = json.loads(response)
+            if isinstance(candidate_files, list) and all(isinstance(f, str) for f in candidate_files):
+                 print(f"Agent suggested entry points: {candidate_files}")
+                 return candidate_files
+            else:
+                 print(f"Warning: Agent response was not a valid JSON list of strings: {response}")
+                 return ["main.py", "app.py", "agent.py", "run.py"]
+        except json.JSONDecodeError:
+            print(f"Warning: Could not parse JSON response from agent: {response}")
+            # Attempt simple parsing if it looks like a plain list string
+            if response.startswith('[') and response.endswith(']'):
+                 try:
+                     # Very basic parsing, might fail
+                     items = response.strip('[]').split(',')
+                     candidates = [item.strip().strip('\'"') for item in items if item.strip()]
+                     if candidates:
+                         print(f"Agent suggested entry points (parsed from string): {candidates}")
+                         return candidates
+                 except Exception:
+                     pass # Ignore parsing errors here
+            return ["main.py", "app.py", "agent.py", "run.py"] # Fallback
+
+    def _get_focused_code_context(self, repo_path: Path, candidate_files: List[str]) -> str:
+        """Reads content only from the candidate files."""
+        print(f"Reading content from candidate files: {candidate_files}")
         code_context = ""
         total_chars = 0
-        files_read = 0
+        files_read_count = 0
 
-        # Prioritize common entry points or config files
-        priority_files = ["main.py", "app.py", "agent.py", "run.py", "requirements.txt", "pyproject.toml", "setup.py"]
-        processed_files = set()
-
-        # Function to read and add content
-        def add_content(filepath, filename_for_header):
-            nonlocal code_context, total_chars, files_read
-            if filepath.is_file() and filepath not in processed_files:
+        for filename in candidate_files:
+            # Ensure filename is treated as relative path from repo_path
+            filepath = repo_path / filename.strip() # Normalize path separators if needed
+            if filepath.is_file():
                 try:
                     content = filepath.read_text(encoding='utf-8', errors='ignore')
-                    header = f"\n--- File: {filename_for_header} ---\n"
+                    header = f"\n--- File: {filename} ---\n"
                     if total_chars + len(content) + len(header) <= MAX_CODE_CONTEXT_CHARS:
                         code_context += header
                         code_context += content
                         total_chars += len(content) + len(header)
-                        files_read += 1
-                        processed_files.add(filepath)
-                        return True # Content added
+                        files_read_count += 1
                     else:
-                        print(f"Warning: Skipping content of {filename_for_header} due to context limit.")
-                        return False # Limit hit
+                        print(f"Warning: Skipping content of {filename} due to context limit.")
+                        # Optionally break here if hitting the limit is critical
+                        # break
                 except Exception as e:
-                    print(f"Warning: Could not read file {filepath}: {e}")
-            return True # Continue if file not found or already processed
+                    print(f"Warning: Could not read candidate file {filepath}: {e}")
+            else:
+                 print(f"Warning: Candidate file not found: {filepath}")
 
-        # Process priority files
-        for filename in priority_files:
-            filepath = repo_path / filename
-            if not add_content(filepath, filename):
-                 break # Stop if limit hit
-
-        # Read other Python files if space permits
-        if total_chars < MAX_CODE_CONTEXT_CHARS:
-            for filepath in repo_path.rglob('*.py'):
-                 # Skip files in .git or other ignored directories if needed
-                 if '.git' in filepath.parts: continue
-
-                 if filepath not in processed_files:
-                    relative_path = filepath.relative_to(repo_path)
-                    if not add_content(filepath, str(relative_path)):
-                        print(f"Warning: Skipping remaining files due to context limit.")
-                        break # Stop reading other files
-
-        print(f"Read {files_read} files ({total_chars} chars) for context.")
+        print(f"Read {files_read_count} candidate files ({total_chars} chars) for focused context.")
         if not code_context:
-             # Don't raise error, let the agent try with just the tree
-             print("Warning: No readable code files found or context limit too small. Agent will rely on file tree.")
+             print("Warning: No content could be read from candidate files.")
         return code_context
 
     def _parse_generated_code(self, response_content: str) -> Optional[str]:
@@ -297,108 +214,67 @@ class GitHubCoralizer:
         if match:
             return match.group(1).strip()
         else:
-            # Fallback: maybe the agent just returned raw code? (Less likely with good prompting)
-            # Be cautious with this fallback.
+            # Fallback only if it looks like code
             if "import asyncio" in response_content and "MCPToolkit" in response_content:
                  print("Warning: Could not find ```python block, attempting to use raw response as code.")
                  return response_content.strip()
             else:
-                 print("Error: Could not parse Python code from the agent's response.")
+                 print("Error: Could not parse Python code from the wrapper generation agent's response.")
                  print("--- Agent Response ---")
                  print(response_content)
                  print("--- End Agent Response ---")
                  return None
 
-    async def _generate_wrapper_with_camel_agent(self, repo_path: Path) -> Optional[str]:
-        """Uses a CAMEL agent to generate the coral_wrapper.py content."""
-        print("Initializing CAMEL agent for code generation...")
+    async def _generate_wrapper_with_camel_agent(self, focused_code_context: str, file_tree: str) -> Optional[str]:
+        """Uses a CAMEL agent to generate the coral_wrapper.py content based on focused context."""
+        print("Initializing CAMEL agent for wrapper generation...")
 
-        # 1. Prepare Context
-        file_tree = self._get_file_tree(repo_path)
-        code_context = self._get_code_context(repo_path)
-
-        # 2. Define System Message for Generator Agent
-        system_message = f"""
+        system_prompt = f"""
 You are an expert Python programmer specializing in multi-agent systems and the CAMEL AI framework.
 Your task is to create the content for a Python script named 'coral_wrapper.py'.
 This script MUST integrate an existing Python agent codebase (context provided below) with the Coral Protocol via the CAMEL AI MCPToolkit.
 
 **Core Requirements for `coral_wrapper.py`:**
-1.  **Imports:** Include necessary imports (`asyncio`, `os`, `sys`, `time`, `camel.agents.ChatAgent`, `camel.models.ModelFactory`, `camel.toolkits.MCPToolkit`, `camel.toolkits.mcp_toolkit.MCPClient`, `camel.types.*`). Also try to include relevant imports from the original codebase context if identifiable.
-2.  **Environment Variables:** The script MUST read `CORAL_SERVER_URL` and `CORAL_AGENT_ID` from environment variables. Provide sensible defaults (e.g., '{self.coral_server_url}' and '{self.agent_id}'). It MUST also read `OPENAI_API_KEY`. Exit gracefully if `OPENAI_API_KEY` is missing.
-3.  **`create_agent` Function:** Define an `async def create_agent(connected_mcp_toolkit, agent_id: str)` function.
-    *   It should get tools using `connected_mcp_toolkit.get_tools()`.
-    *   Define a system message for the *runtime* agent. This message should clearly state its `agent_id` and instruct it to use the Coral tools (register, list, send, wait_for_mentions).
-    *   Create an OpenAI model using `ModelFactory.create` (e.g., `ModelType.GPT_4_TURBO` or `GPT_4O`, platform `ModelPlatformType.OPENAI`, read API key from env var). Use a low temperature (e.g., 0.2).
-    *   Instantiate a `camel.agents.ChatAgent` with the system message, model, and tools.
-    *   Return the created agent.
-4.  **`main` Function:** Define an `async def main()` function.
-    *   Print status messages (connecting, creating agent, registering, starting loop).
-    *   Read `CORAL_AGENT_ID` and `CORAL_SERVER_URL` from environment variables (with defaults).
-    *   Create `MCPClient` and `MCPToolkit`.
-    *   Use `async with mcp_toolkit.connection() as connected_mcp_toolkit:` block.
-    *   Call `create_agent` inside the `with` block.
-    *   **Register the Agent:** Explicitly call `await camel_agent.astep(f"Register yourself with the agent ID '{{agent_id}}'.")`. Handle potential errors during registration.
-    *   **Main Loop:** Implement a `while True` loop. Inside the loop:
-        *   Use `await camel_agent.astep(...)` with a prompt instructing the agent to check for messages (e.g., using `wait_for_mentions` tool) and perform actions.
-        *   Include `asyncio.sleep()` (e.g., 10 seconds) to prevent busy-waiting.
-        *   Include basic error handling (`try...except Exception`).
-5.  **Entry Point:** Include `if __name__ == "__main__": asyncio.run(main())`. Add basic `KeyboardInterrupt` handling.
-6.  **Integration (Placeholder):** Include comments indicating where the original agent's logic/classes/functions (identified from the context) might be imported or called, but DO NOT implement this integration yourself. The goal is a functional CAMEL wrapper that connects to Coral.
-7.  **Output Format:** Respond ONLY with the generated Python code enclosed in a single ```python ... ``` block. Do not include any other text, explanations, or introductions.
+1.  **Imports:** Include necessary imports (`asyncio`, `os`, `sys`, `time`, `camel.agents.ChatAgent`, `camel.models.ModelFactory`, `camel.toolkits.MCPToolkit`, `camel.toolkits.mcp_toolkit.MCPClient`, `camel.types.*`). Also **infer and include** relevant imports FROM THE PROVIDED `Code Snippets` context below.
+2.  **Environment Variables:** The script MUST read `CORAL_SERVER_URL` (default '{self.coral_server_url}') and `CORAL_AGENT_ID` (default '{self.agent_id}') from environment variables. It MUST also read `OPENAI_API_KEY`. Exit gracefully if `OPENAI_API_KEY` is missing.
+3.  **`create_agent` Function:** Define `async def create_agent(connected_mcp_toolkit, agent_id: str)`.
+    *   Get tools using `connected_mcp_toolkit.get_tools()`.
+    *   Define a system message for the *runtime* agent (instructing it to use Coral tools).
+    *   Create an OpenAI model using `ModelFactory.create` (e.g., `ModelType.GPT_4O`, platform `ModelPlatformType.OPENAI`, read API key from env). Use temperature 0.2.
+    *   It must instantiate a client or entrypoint to the main agent in the github codebase, not just a camel agent, if the repo has a main agent, we replace the create agent with the entrypoint logic in the repo, otherwise if its a tool based repo, we can create an agent to use the tools
+4.  **`main` Function:** Define `async def main()`.
+    *   Read env vars, create `MCPClient` and `MCPToolkit`.
+    *   Use `async with mcp_toolkit.connection()`.
+    *   Call `create_agent`.
+    *   **Register the Agent:** Call `await camel_agent.astep(f"Register yourself with the agent ID '{{agent_id}}'.")`.
+    *   **Main Loop:** Implement `while True` loop with `await camel_agent.astep(...)` (e.g., checking for mentions) and `asyncio.sleep(10)`. Include basic error handling.
+5.  **Entry Point:** Include `if __name__ == "__main__": asyncio.run(main())`.
+6.  **Integration (Placeholder):** Include comments suggesting where to import/call original agent logic based on the `Code Snippets`, but DO NOT implement the integration.
+7.  **Output Format:** Respond ONLY with the generated Python code enclosed in a single ```python ... ``` block. Do not include any other text.
 
 **Context from Cloned Repository:**
 
-**File Structure:**
+**File Structure Overview:**
 ```
 {file_tree}
 ```
 
-**Code Snippets:**
+**Code Snippets (Focus on these for imports/logic):**
 ```python
-{code_context}
-```
-
-**Example Output:**
-```python
-{example_output}
+{focused_code_context if focused_code_context else "# No specific code context provided, focus on standard wrapper."}
 ```
 
 Generate the `coral_wrapper.py` content based *only* on the requirements and the provided context.
 """
+        user_prompt = "Generate the Python code for the `coral_wrapper.py` script based on the requirements and context provided in the system message."
 
-        # 3. Create Generator Agent
-        try:
-            # Use a capable model for code generation
-            generator_model = ModelFactory.create(
-                model_platform=ModelPlatformType.OPENAI,
-                model_type=ModelType.GPT_4O, # Or GPT_4_TURBO
-                api_key=self.openai_api_key,
-                model_config_dict={"temperature": 0.1}, # Low temp for deterministic code gen
-            )
-            code_generator_agent = ChatAgent(system_message=system_message, model=generator_model)
-            code_generator_agent.reset() # Start fresh
-        except Exception as e:
-            print(f"Error creating code generation agent: {e}")
+        response = await _run_camel_agent_step(system_prompt, user_prompt, self.openai_api_key, ModelType.GPT_4O) # Use capable model
+
+        if response:
+            return self._parse_generated_code(response)
+        else:
+            print("Error: Wrapper generation agent failed to respond.")
             return None
-
-        # 4. Run Agent Step
-        prompt = "Generate the Python code for the `coral_wrapper.py` script based on the requirements and context provided in the system message."
-        print("Asking CAMEL agent to generate wrapper code...")
-        try:
-            response = await code_generator_agent.astep(prompt)
-            if response and response.msgs:
-                assistant_msg = response.msgs[0]
-                print("Agent generation complete.")
-                # 5. Parse Output
-                return self._parse_generated_code(assistant_msg.content)
-            else:
-                print("Error: Code generation agent did not return a valid response.")
-                return None
-        except Exception as e:
-            print(f"Error during code generation agent step: {e}")
-            return None
-
 
     def generate_dockerfile(self, repo_path: Path) -> str:
         """Generates a Dockerfile for the GitHub repo."""
@@ -413,6 +289,10 @@ Generate the `coral_wrapper.py` content based *only* on the requirements and the
         has_pyproject = (repo_path / "pyproject.toml").exists() # Could be poetry, pdm, etc.
 
         install_commands = []
+        # Base dependencies
+        install_commands.append("RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*")
+        install_commands.append("RUN pip install --no-cache-dir --upgrade pip")
+
         if has_req_txt:
             print("Found requirements.txt.")
             install_commands.append("COPY requirements.txt .")
@@ -477,23 +357,33 @@ CMD ["python", "-u", "/app/coral_wrapper.py"]
         return dockerfile
 
     async def coralize(self) -> Tuple[Optional[str], Optional[str], Optional[Path]]:
-        """Clones repo, generates wrapper (via CAMEL agent) and Dockerfile."""
+        """Orchestrates the multi-step coralization process."""
         repo_path = await self._clone_repo()
+        if not repo_path: return None, None, None
+
         try:
-            # Generate wrapper using the CAMEL agent method
-            wrapper = await self._generate_wrapper_with_camel_agent(repo_path)
+            # Step 1: Identify entry points
+            file_tree = self._get_file_tree(repo_path)
+            candidate_files = await self._identify_entry_points_with_camel_agent(file_tree)
+
+            # Step 2: Get focused context
+            focused_context = self._get_focused_code_context(repo_path, candidate_files)
+
+            # Step 3: Generate wrapper using focused context
+            wrapper = await self._generate_wrapper_with_camel_agent(focused_context, file_tree)
             if not wrapper:
                  print("Error: Failed to generate wrapper code using CAMEL agent.")
                  self.cleanup()
                  return None, None, None # Indicate failure
 
+            # Step 4: Generate Dockerfile
             dockerfile = self.generate_dockerfile(repo_path)
-            # Return repo_path so build_and_run knows where the context is
+
             return wrapper, dockerfile, repo_path
         except Exception as e:
             print(f"Error during coralization process: {e}")
-            self.cleanup() # Clean up temp dir on error
-            raise e # Re-raise the exception
+            self.cleanup()
+            raise e
 
     def build_and_run(self, wrapper: str, dockerfile: str, repo_path: Path) -> None:
         """Builds and runs the Docker container for the GitHub repo."""
