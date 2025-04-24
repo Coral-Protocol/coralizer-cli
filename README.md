@@ -1,11 +1,15 @@
+  
+# 🚧🚧 Under construction 🚧🚧
+This is under construction, if something seems not to be working, it's probably not just you - Please feel free to create issues and ask any questions, no matter how stupid they might feel to you 😄
+
 # Coral Protocol - Monorepo
 
-This repository contains tools and implementations related to the Coral Protocol for multi-agent systems.
+This repository contains the coralizer's CLI
 
 ## Projects
 
 * **`coral-cli/`**: A command-line interface (CLI) for initializing Coral agent projects, managing the Coral chatroom server, and "coralizing" (onboarding) existing AI projects onto the Coral network. See [coral_cli/README.md](coral_cli/README.md) for details.
-* **`coral-server/`**: A Java-based implementation of a Coral chatroom server using the Model Context Protocol (MCP). It provides tools for agents to register, communicate, and manage conversation threads. See [coral-server/README.md](coral-server/README.md) for details.
+* **`coral-server/`**: A Kotlin-based implementation of a Coral server using the Model Context Protocol (MCP). See [coral-server/README.md](coral-server/README.md) for details.
 
 ## Setup
 
